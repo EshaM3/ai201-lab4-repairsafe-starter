@@ -43,8 +43,8 @@ Record every interaction — question, safety tier, and response preview — to 
 | `"tier"` | `str` | Safety tier assigned to this question |
 | `"question"` | `str` | The user's question, truncated to 300 characters |
 | `"response_preview"` | `str` | First 200 characters of the generated response |
-| `[your field]` | `[type]` | [description] |
-| `[your field]` | `[type]` | [description] |
+| `"reason"` | `str` | The reason for the safety tier classification |
+| `"interaction_id"` | `str` | Unique ID (uuid4) generated per interaction, so a specific logged response can be looked up if a user reports a problem |
 
 ---
 
@@ -53,7 +53,17 @@ Record every interaction — question, safety tier, and response preview — to 
 *The required fields truncate the question to 300 characters and the response to 200. Write down the reasoning for each — what would you lose by truncating more aggressively, and what's the risk of logging the full text at production scale?*
 
 ```
-[your answer here]
+Question (300 chars): enough to see the full intent of a real repair question and
+spot misclassification patterns, while capping pasted walls of text. Truncating
+much harder (e.g. 50 chars) would cut questions mid-sentence and hide the detail
+that explains why a tier was assigned.
+
+Response (200 chars): a preview is enough to confirm the response matched the tier
+(e.g. a "refuse" answer didn't leak steps); the full text isn't needed for triage.
+
+Logging full text at scale risks unbounded log growth (storage/cost) and stores more
+user-submitted content than necessary — a privacy and PII liability. Truncating keeps
+the log lightweight and reviewable while retaining enough to diagnose problems.
 ```
 
 ---
@@ -63,7 +73,18 @@ Record every interaction — question, safety tier, and response preview — to 
 *What happens if `logs/` doesn't exist when the function runs for the first time? How will you handle that — and why is this worth thinking about at all?*
 
 ```
-[your answer here]
+If logs/ doesn't exist, opening the file in append mode raises FileNotFoundError and
+the whole interaction crashes — even though the response was generated fine. So before
+writing, the function ensures the directory exists with:
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+exist_ok=True makes it a no-op when the directory is already there, so it's safe to
+call on every write.
+
+Why it matters: the log directory isn't committed (it's empty/gitignored), so the very
+first run on any fresh checkout hits this case. An audit logger that crashes the app on
+first run is worse than no logger — and silently losing the first interactions would
+defeat the point of an audit trail. Creating the directory on demand makes logging
+robust to a clean environment.
 ```
 
 ---
@@ -73,7 +94,13 @@ Record every interaction — question, safety tier, and response preview — to 
 *Write an example of what you want the one-line terminal summary to look like after a question is logged. Be specific about format.*
 
 ```
-[your example output here]
+[2026-06-22T18:04:31Z] id=a3f8c1e2 tier=refuse q="how do I move the main gas line in my kitchen?" reason="Moving a main gas line risks fire/explosion and requires a licensed pro." resp="This repair is too dangerous to attempt yourself..."
+
+Format: [<timestamp>] id=<first 8 of interaction_id> tier=<tier> q="<question ~50 chars>" reason="<reason ~70 chars>" resp="<response_preview ~50 chars>"
+
+One line per interaction so a test run stays scannable; the long fields (question,
+reason, response) are truncated here for the terminal — the full 300/200-char
+values still go to audit.jsonl, which is the system of record.
 ```
 
 ---
@@ -85,11 +112,21 @@ Record every interaction — question, safety tier, and response preview — to 
 **The actual log file content after 3 test queries (paste the three JSON lines):**
 
 ```
-[your answer here]
+{"timestamp": "2026-06-22T08:30:09.284127Z", "interaction_id": "e6bab4e9", "tier": "safe", "question": "How do I patch a small hole in drywall?", "reason": "Patching a small hole in drywall is a low-risk, routine maintenance task that can be done without specialized training or tools.", "response_preview": "Patching a small hole in drywall is a relatively simple and straightforward process. Here's a step-by-step guide to help you do it safely and effectively:\n\n**Materials needed:**\n- Drywall repair compo"}
+{"timestamp": "2026-06-22T08:30:28.088984Z", "interaction_id": "2623686d", "tier": "caution", "question": "How do I reset a GFCI outlet that won't reset?", "reason": "Resetting a GFCI outlet that won't reset involves working with an existing electrical circuit and requires careful consideration to avoid potential electrical shock or further tripping the outlet.", "response_preview": "Resetting a GFCI (Ground Fault Circuit Interrupter) outlet that won't reset requires careful attention to safety and potential risks. Here's a step-by-step guide:\n\n1. **Turn off the power to the circu"}
+{"timestamp": "2026-06-22T08:30:31.438179Z", "interaction_id": "f7eee3a9", "tier": "refuse", "question": "Can I upgrade my electrical panel to 200 amps myself?", "reason": "Upgrading an electrical panel to 200 amps involves significant modifications to the electrical system, requires specialized training and tools, and poses a high risk of fire or electrical shock if done incorrectly, making it a task that should only be performed by a licensed professional.", "response_preview": "Upgrading an electrical panel can be extremely hazardous, as it poses a significant risk of electrical shock, fire, and even death. Improper modifications can lead to electrical arcs, short circuits, "}
 ```
 
 **One field you'd add to the log if this were a real production system handling 10,000 questions per day:**
 
 ```
-[your answer here]
+"user_id" (or "session_id") — an identifier for who submitted the question.
+
+At 10,000 questions/day the per-interaction "interaction_id" lets you find one row, but
+it can't answer the questions that actually matter at scale: Is one user repeatedly
+probing "refuse"-tier topics (a sign of abuse or jailbreak attempts)? Which users should
+be rate-limited? When a user reports a bad experience, what did their whole session look
+like, not just one row? Grouping the log by user is what turns it from a flat list of
+events into something you can monitor for patterns and abuse — and it's the field that
+makes rate limiting possible in the first place.
 ```
